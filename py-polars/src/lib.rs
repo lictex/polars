@@ -67,7 +67,7 @@ static ALLOC: Jemalloc = Jemalloc;
 static ALLOC: MiMalloc = MiMalloc;
 
 #[pymodule]
-fn polars(py: Python, m: &PyModule) -> PyResult<()> {
+pub fn py_polars(py: Python, m: &PyModule) -> PyResult<()> {
     // Classes
     m.add_class::<PySeries>().unwrap();
     m.add_class::<PyDataFrame>().unwrap();

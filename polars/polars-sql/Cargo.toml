@@ -1,6 +1,6 @@
 [package]
 name = "polars-sql"
-version.workspace = true
+version = "0.31.1"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/pola-rs/polars"

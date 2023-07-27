@@ -24,7 +24,7 @@ polars-algo = { path = "../polars/polars-algo", default-features = false }
 polars-core = { path = "../polars/polars-core", features = ["python"], default-features = false }
 polars-error = { path = "../polars/polars-error" }
 polars-lazy = { path = "../polars/polars-lazy", features = ["python"], default-features = false }
-pyo3 = { version = "0.19", features = ["extension-module", "multiple-pymethods"] }
+pyo3 = { version = "0.19", features = ["multiple-pymethods"] }
 pyo3-built = { version = "0.4", optional = true }
 serde_json = { version = "1", optional = true }
 smartstring = "1"
@@ -172,8 +172,7 @@ features = [
 ]
 
 [lib]
-name = "polars"
-crate-type = ["cdylib"]
+name = "py_polars"
 
 [profile.release]
 codegen-units = 1

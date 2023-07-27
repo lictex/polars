@@ -1,6 +1,6 @@
 [package]
 name = "polars-ops"
-version.workspace = true
+version = "0.31.1"
 authors = ["ritchie46 <ritchie46@gmail.com>"]
 edition = "2021"
 license = "MIT"
