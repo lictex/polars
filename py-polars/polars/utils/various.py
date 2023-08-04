@@ -183,10 +183,15 @@ def can_create_dicts_with_pyarrow(dtypes: Sequence[PolarsDataType]) -> bool:
 
 def normalise_filepath(path: str | Path, check_not_directory: bool = True) -> str:
     """Create a string path, expanding the home directory if present."""
-    path = Path(path).expanduser()
-    if check_not_directory and path.exists() and path.is_dir():
+    # don't use pathlib here as it modifies slashes (s3:// -> s3:/)
+    path = os.path.expanduser(path)  # noqa: PTH111
+    if (
+        check_not_directory
+        and os.path.exists(path)  # noqa: PTH110
+        and os.path.isdir(path)  # noqa: PTH112
+    ):
         raise IsADirectoryError(f"Expected a file path; {path!r} is a directory")
-    return str(path)
+    return path
 
 
 def parse_version(version: Sequence[str | int]) -> tuple[int, ...]:
@@ -353,20 +358,19 @@ NoDefault = Literal[_NoDefault.no_default]
 
 def find_stacklevel() -> int:
     """
-    Find the first place in the stack that is not inside polars (tests notwithstanding).
+    Find the first place in the stack that is not inside polars.
 
     Taken from:
     https://github.com/pandas-dev/pandas/blob/ab89c53f48df67709a533b6a95ce3d911871a0a8/pandas/util/_exceptions.py#L30-L51
     """
     pkg_dir = Path(pl.__file__).parent
-    test_dir = pkg_dir / "tests"
 
     # https://stackoverflow.com/questions/17407119/python-inspect-stack-is-slow
     frame = inspect.currentframe()
     n = 0
     while frame:
         fname = inspect.getfile(frame)
-        if fname.startswith(str(pkg_dir)) and not fname.startswith(str(test_dir)):
+        if fname.startswith(str(pkg_dir)):
             frame = frame.f_back
             n += 1
         else:
@@ -375,10 +379,13 @@ def find_stacklevel() -> int:
 
 
 def _get_stack_locals(
-    of_type: type | tuple[type, ...] | None = None, n_objects: int | None = None
+    of_type: type | tuple[type, ...] | None = None,
+    n_objects: int | None = None,
+    n_frames: int | None = None,
+    named: str | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """
-    Retrieve f_locals from all stack frames (starting from the current frame).
+    Retrieve f_locals from all (or the last 'n') stack frames from the calling location.
 
     Parameters
     ----------
@@ -386,18 +393,36 @@ def _get_stack_locals(
         Only return objects of this type.
     n_objects
         If specified, return only the most recent ``n`` matching objects.
+    n_frames
+        If specified, look at objects in the last ``n`` stack frames only.
+    named
+        If specified, only return objects matching the given name(s).
 
     """
+    if isinstance(named, str):
+        named = (named,)
+
     objects = {}
+    examined_frames = 0
+    if n_frames is None:
+        n_frames = sys.maxsize
     stack_frame = getattr(inspect.currentframe(), "f_back", None)
-    while stack_frame:
+
+    while stack_frame and examined_frames < n_frames:
         local_items = list(stack_frame.f_locals.items())
         for nm, obj in reversed(local_items):
-            if nm not in objects and (not of_type or isinstance(obj, of_type)):
+            if (
+                nm not in objects
+                and (named is None or (nm in named))
+                and (of_type is None or isinstance(obj, of_type))
+            ):
                 objects[nm] = obj
                 if n_objects is not None and len(objects) >= n_objects:
                     return objects
+
         stack_frame = stack_frame.f_back
+        examined_frames += 1
+
     return objects
 
 

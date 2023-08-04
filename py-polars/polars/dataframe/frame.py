@@ -4,7 +4,6 @@ from __future__ import annotations
 import contextlib
 import os
 import random
-import warnings
 from collections import defaultdict
 from collections.abc import Sized
 from io import BytesIO, StringIO, TextIOWrapper
@@ -87,12 +86,14 @@ from polars.utils._construction import (
 from polars.utils._parse_expr_input import parse_as_expression
 from polars.utils._wrap import wrap_expr, wrap_ldf, wrap_s
 from polars.utils.convert import _timedelta_to_pl_duration
-from polars.utils.decorators import deprecated_alias
+from polars.utils.deprecation import (
+    deprecate_renamed_parameter,
+    issue_deprecation_warning,
+)
 from polars.utils.various import (
     _prepare_row_count_args,
     _process_null_values,
     can_create_dicts_with_pyarrow,
-    find_stacklevel,
     handle_projection_columns,
     is_bool_sequence,
     is_int_sequence,
@@ -455,10 +456,6 @@ class DataFrame:
           Support type specification or override of one or more columns; note that
           any dtypes inferred from the columns param will be overridden.
 
-        Returns
-        -------
-        DataFrame
-
         """
         return cls._from_pydf(
             dict_to_pydf(data, schema=schema, schema_overrides=schema_overrides)
@@ -500,10 +497,6 @@ class DataFrame:
             this does not yield conclusive results, column orientation is used.
         infer_schema_length
             How many rows to scan to determine the column type.
-
-        Returns
-        -------
-        DataFrame
 
         """
         return cls._from_pydf(
@@ -550,10 +543,6 @@ class DataFrame:
             the orientation is inferred by matching the columns and data dimensions. If
             this does not yield conclusive results, column orientation is used.
 
-        Returns
-        -------
-        DataFrame
-
         """
         return cls._from_pydf(
             numpy_to_pydf(
@@ -595,10 +584,6 @@ class DataFrame:
             any dtypes inferred from the columns param will be overridden.
         rechunk : bool, default True
             Make sure that all data is in contiguous memory.
-
-        Returns
-        -------
-        DataFrame
 
         """
         return cls._from_pydf(
@@ -647,10 +632,6 @@ class DataFrame:
             If the data contains NaN values they will be converted to null/None.
         include_index : bool, default False
             Load any non-default pandas indexes as columns.
-
-        Returns
-        -------
-        DataFrame
 
         """
         return cls._from_pydf(
@@ -895,10 +876,6 @@ class DataFrame:
         n_rows
             Stop reading from Apache Avro file after reading ``n_rows``.
 
-        Returns
-        -------
-        DataFrame
-
         """
         if isinstance(source, (str, Path)):
             source = normalise_filepath(source)
@@ -941,10 +918,6 @@ class DataFrame:
             Make sure that all data is contiguous.
         memory_map
             Memory map the file
-
-        Returns
-        -------
-        DataFrame
 
         """
         if isinstance(source, (str, Path)):
@@ -1179,6 +1152,18 @@ class DataFrame:
 
         """
         return self._df.dtypes()
+
+    @property
+    def flags(self) -> dict[str, dict[str, bool]]:
+        """
+        Get flags that are set on the columns of this DataFrame.
+
+        Returns
+        -------
+        dict
+            Mapping from column names to column flags.
+        """
+        return {name: self[name].flags for name in self.columns}
 
     @property
     def schema(self) -> SchemaDict:
@@ -2040,7 +2025,7 @@ class DataFrame:
             of null values. Subsequent operations on the resulting pandas DataFrame may
             trigger conversion to NumPy arrays if that operation is not supported by
             pyarrow compute functions.
-        kwargs
+        **kwargs
             Arguments will be sent to :meth:`pyarrow.Table.to_pandas`.
 
         Returns
@@ -2549,11 +2534,13 @@ class DataFrame:
         hidden_columns: Sequence[str] | None = None,
         hide_gridlines: bool = False,
         sheet_zoom: int | None = None,
-        freeze_panes: str
-        | tuple[str, int, int]
-        | tuple[int, int]
-        | tuple[int, int, int, int]
-        | None = None,
+        freeze_panes: (
+            str
+            | tuple[int, int]
+            | tuple[str, int, int]
+            | tuple[int, int, int, int]
+            | None
+        ) = None,
     ) -> Workbook:
         """
         Write frame data to a table in an Excel workbook/worksheet.
@@ -3110,6 +3097,11 @@ class DataFrame:
         pyarrow_options
             Arguments passed to ``pyarrow.parquet.write_table``.
 
+            If you pass ``partition_cols`` here, the dataset will be written
+            using ``pyarrow.parquet.write_to_dataset``.
+            The ``partition_cols`` parameter leads to write the dataset to a directory.
+            Similar to Spark's partitioned datasets.
+
         Examples
         --------
         >>> import pathlib
@@ -3124,11 +3116,27 @@ class DataFrame:
         >>> path: pathlib.Path = dirpath / "new_file.parquet"
         >>> df.write_parquet(path)
 
+        We can use pyarrow with use_pyarrow_write_to_dataset=True
+        to write partitioned datasets. The following example will
+        write the first row to ../watermark=1/*.parquet and the
+        other rows to ../watermark=2/*.parquet.
+
+        >>> df = pl.DataFrame({"a": [1, 2, 3], "watermark": [1, 2, 2]})
+        >>> path: pathlib.Path = dirpath / "partitioned_object"
+        >>> df.write_parquet(
+        ...     path,
+        ...     use_pyarrow=True,
+        ...     pyarrow_options={"partition_cols": ["watermark"]},
+        ... )
+
         """
         if compression is None:
             compression = "uncompressed"
         if isinstance(file, (str, Path)):
-            file = normalise_filepath(file)
+            if pyarrow_options is not None and pyarrow_options.get("partition_cols"):
+                file = normalise_filepath(file, check_not_directory=True)
+            else:
+                file = normalise_filepath(file)
 
         if use_pyarrow:
             tbl = self.to_arrow()
@@ -3146,24 +3154,40 @@ class DataFrame:
             # needed below
             import pyarrow.parquet  # noqa: F401
 
-            pa.parquet.write_table(
-                table=tbl,
-                where=file,
-                row_group_size=row_group_size,
-                compression=None if compression == "uncompressed" else compression,
-                compression_level=compression_level,
-                write_statistics=statistics,
-                **(pyarrow_options or {}),
-            )
+            if pyarrow_options is not None and pyarrow_options.get("partition_cols"):
+                pyarrow_options["compression"] = (
+                    None if compression == "uncompressed" else compression
+                )
+                pyarrow_options["compression_level"] = compression_level
+                pyarrow_options["write_statistics"] = statistics
+                pyarrow_options["row_group_size"] = row_group_size
+
+                pa.parquet.write_to_dataset(
+                    table=tbl,
+                    root_path=file,
+                    **(pyarrow_options or {}),
+                )
+            else:
+                pa.parquet.write_table(
+                    table=tbl,
+                    where=file,
+                    row_group_size=row_group_size,
+                    compression=None if compression == "uncompressed" else compression,
+                    compression_level=compression_level,
+                    write_statistics=statistics,
+                    **(pyarrow_options or {}),
+                )
+
         else:
             self._df.write_parquet(
                 file, compression, compression_level, statistics, row_group_size
             )
 
+    @deprecate_renamed_parameter("connection_uri", "connection", version="0.18.9")
     def write_database(
         self,
         table_name: str,
-        connection_uri: str,
+        connection: str,
         *,
         if_exists: DbWriteMode = "fail",
         engine: DbWriteEngine = "sqlalchemy",
@@ -3176,8 +3200,8 @@ class DataFrame:
         table_name
             Name of the table to create or append to in the target SQL database.
             If your table name contains special characters, it should be quoted.
-        connection_uri
-            Connection URI, for example:
+        connection
+            Connection URI string, for example:
 
             * "postgresql://user:pass@server:port/database"
             * "sqlite:////path/to/database.db"
@@ -3203,10 +3227,8 @@ class DataFrame:
                     f"Value for 'if_exists'={if_exists} was unexpected. "
                     f"Choose one of: {'fail', 'replace', 'append'}."
                 )
-            with _open_adbc_connection(connection_uri) as conn:
-                cursor = conn.cursor()
+            with _open_adbc_connection(connection) as conn, conn.cursor() as cursor:
                 cursor.adbc_ingest(table_name, self.to_arrow(), mode)
-                cursor.close()
                 conn.commit()
 
         elif engine == "sqlalchemy":
@@ -3237,7 +3259,7 @@ class DataFrame:
 
             # ensure conversion to pandas uses the pyarrow extension array option
             # so that we can make use of the sql/db export without copying data
-            engine_sa = create_engine(connection_uri)
+            engine_sa = create_engine(connection)
             self.to_pandas(use_pyarrow_extension_array=True).to_sql(
                 name=table_name,
                 schema=db_schema,
@@ -3545,23 +3567,10 @@ class DataFrame:
         │ col2   ┆ 3   ┆ 4   ┆ 6   │
         └────────┴─────┴─────┴─────┘
         """
-        pydf = self._df
-        if isinstance(column_names, str):
-            pydf = self.drop(column_names)._df
-            column_names = self._df.column(column_names).to_list()
-        df = self._from_pydf(pydf.transpose(include_header, header_name))
-        if column_names is not None:
-            names = []
-            n = df.width
-            if include_header:
-                names.append(header_name)
-                n -= 1
-
-            column_names = iter(column_names)
-            for _ in range(n):
-                names.append(next(column_names))
-            df.columns = names
-        return df
+        keep_names_as = header_name if include_header else None
+        if isinstance(column_names, Generator):
+            column_names = [next(column_names) for _ in range(self.height)]
+        return self._from_pydf(self._df.transpose(keep_names_as, column_names))
 
     def reverse(self) -> DataFrame:
         """
@@ -4175,7 +4184,7 @@ class DataFrame:
             .collect(
                 projection_pushdown=False,
                 predicate_pushdown=False,
-                common_subplan_elimination=False,
+                comm_subplan_elim=False,
                 slice_pushdown=True,
             )
         )
@@ -4267,7 +4276,7 @@ class DataFrame:
             .collect(
                 projection_pushdown=False,
                 predicate_pushdown=False,
-                common_subplan_elimination=False,
+                comm_subplan_elim=False,
                 slice_pushdown=True,
             )
         )
@@ -5623,7 +5632,7 @@ class DataFrame:
 
         Returns
         -------
-            Joined DataFrame
+        DataFrame
 
         See Also
         --------
@@ -5872,7 +5881,7 @@ class DataFrame:
         else:
             return self._from_pydf(self._df.hstack([s._s for s in columns]))
 
-    @deprecated_alias(df="other")
+    @deprecate_renamed_parameter("df", "other", version="0.18.8")
     def vstack(self, other: DataFrame, *, in_place: bool = False) -> Self:
         """
         Grow this DataFrame vertically by stacking a DataFrame to it.
@@ -6070,7 +6079,8 @@ class DataFrame:
 
         Returns
         -------
-        The dropped column.
+        Series
+            The dropped column.
 
         Examples
         --------
@@ -6298,6 +6308,7 @@ class DataFrame:
 
         Returns
         -------
+        DataFrame
             DataFrame with None values replaced by the filling strategy.
 
         See Also
@@ -6377,11 +6388,12 @@ class DataFrame:
         Parameters
         ----------
         value
-            Value to fill NaN with.
+            Value with which to replace NaN values.
 
         Returns
         -------
-            DataFrame with NaN replaced with fill_value
+        DataFrame
+            DataFrame with NaN values replaced by the given value.
 
         Warnings
         --------
@@ -6575,12 +6587,11 @@ class DataFrame:
             columns = [columns]
 
         if aggregate_function is no_default:
-            warnings.warn(
+            issue_deprecation_warning(
                 "In a future version of polars, the default `aggregate_function` "
                 "will change from `'first'` to `None`. Please pass `'first'` to keep the "
                 "current behaviour, or `None` to accept the new one.",
-                DeprecationWarning,
-                stacklevel=find_stacklevel(),
+                version="0.16.16",
             )
             aggregate_function = "first"
 
@@ -7322,7 +7333,8 @@ class DataFrame:
 
         Returns
         -------
-        A new DataFrame with the columns added.
+        DataFrame
+            A new DataFrame with the columns added.
 
         Notes
         -----
@@ -7984,7 +7996,8 @@ class DataFrame:
 
         Returns
         -------
-        DataFrame with unique rows.
+        DataFrame
+            DataFrame with unique rows.
 
         Warnings
         --------
@@ -8143,7 +8156,7 @@ class DataFrame:
         """
         return self._from_pydf(self._df.null_count())
 
-    @deprecated_alias(frac="fraction")
+    @deprecate_renamed_parameter("frac", "fraction", version="0.17.0")
     def sample(
         self,
         n: int | None = None,
@@ -8346,7 +8359,7 @@ class DataFrame:
 
         Returns
         -------
-        Tuple (default) or dictionary of row values.
+        tuple (default) or dictionary of row values
 
         Notes
         -----
@@ -8470,7 +8483,7 @@ class DataFrame:
 
         Returns
         -------
-        A list of tuples (default) or dictionaries of row values.
+        list of tuples (default) or dictionaries of row values
 
         Examples
         --------
@@ -8711,7 +8724,7 @@ class DataFrame:
 
         Returns
         -------
-        An iterator of tuples (default) or dictionaries (if named) of python row values.
+        iterator of tuples (default) or dictionaries (if named) of python row values
 
         Examples
         --------
